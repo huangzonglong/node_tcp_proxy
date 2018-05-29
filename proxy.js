@@ -3,16 +3,11 @@
  * net模块官方文档 https://nodejs.org/api/net.html
  * Created by huangzonglong.
  */
-var net = require('net');
-var uuid = require('uuid').v4();
-var Log = require('./log.js');
-var Config = require('./config.js')[process.env.NODE_MQTT_ENV || 'development'];
-var proxySockets = proxySocketsKeys = [];
-
-function uniqueKey(socket) {
-    var key = socket.remoteAddress + ":" + socket.remotePort;
-    return key;
-}
+var net 	= require('net');
+var uuid 	= require('uuid').v4();
+var Log 	= require('./log.js');
+var Config 	= require('./config.js')[process.env.NODE_MQTT_ENV || 'development'];
+var reConnSec = 300;
 
 /**
  * 组装mqtt连接数据 buffer
@@ -53,85 +48,85 @@ function mqttBufferToString(buf) {
     return (new Buffer(JSON.parse(JSON.stringify(buf)))).toString();
 }
 
-Log.warn("服务启动中...");
+Log.warn("服务启动>>>");
 
 /**
- * 代理
+ * 创建本地服务，监听connection回调
  */
-var tcpProxyServer = net.createServer( function (proxySocket) {//{allowHalfOpen:true},
-    // proxySockets.push(proxySocket.remoteAddress + ":" + proxySocket.remotePort);
-    var key = proxySocket.remoteAddress + ":" + proxySocket.remotePort;
-    proxySockets[key] = proxySocket;
+var tcpProxyServer = net.createServer( function (proxySocket) {
+    var clientName = proxySocket.remoteAddress + ":" + proxySocket.remotePort;
+	
     var context = {
+		isConnected: false,
         proxySocket: proxySocket
     };
-
-    proxySocket.on('data', function (msg) {
-        //连接复用
-        if ((context.serviceSocket != undefined)) {
+	
+	context.proxySocket.setTimeout(2601000);
+	context.proxySocket.setNoDelay(true);
+			
+	//优先捕获客户端错误，再进行write，避免异常
+	context.proxySocket.on('error', function (error) {
+        Log.err('客户端 《' + clientName + '》 异常终止:' + error.errno);
+		context.proxySocket.end();//终止当前客户端
+        context.serviceSocket.destroy();//销毁当前客户端建立的socket，停止向其发送数据
+		
+    });
+	
+	//客户端发送数据
+    context.proxySocket.on('data', function (msg) {
+        if (context.isConnected === true){ //连接复用
             context.serviceSocket.write(msg);
         } else {
             context.serviceSocket = new net.Socket();
-            //连接代理
-            Log.warn("开始连接代理：" + Config.REMOTE_HOST + ':' + Config.REMOTE_PORT);
+			context.isConnected = true;
+          
+			context.serviceSocket.setNoDelay(true);
+
+			//连接emq服务
+			Log.warn("connect TO emq server：" + Config.REMOTE_HOST + ':' + Config.REMOTE_PORT);
             context.serviceSocket.connect(parseInt(Config.REMOTE_PORT), Config.REMOTE_HOST, function () {
                 var buf = mqttJsonToBuffer();
-                Log.warn("连接成功，修改协议 buf数据为：", mqttBufferToString(buf));
+                Log.warn("连接到emq服务器，并写入数据：", mqttBufferToString(buf));
                 context.serviceSocket.write(buf);
             });
 
+			//服务器收到数据时，也往客户端发送数据
             context.serviceSocket.on("data", function (data) {
-                // proxySockets.forEach(function(sc){
-                //     console.log(sc)
-                //     sc.write(data);
-                // });
                 context.proxySocket.write(data);
             });
 
+			//emq服务端关闭时，也关闭当前客户端
             context.serviceSocket.on('end', function () {
-                Log.err(' == serviceSocket disconnected from server\n');
+                Log.err('serviceSocket disconnected from server');
+				context.proxySocket.end();
             });
 
             //服务端连接出问题，断开客户端
             context.serviceSocket.on('error', function (error) {
-                Log.err(' == serviceSocket has error \n', error);
-                context.proxySocket.destroy();
+                context.serviceSocket.destroy();
+				context.proxySocket.end();
+				
+				Log.err('serviceSocket has error', error);
             });
         }
     });
 
     context.proxySocket.on('end', function () {
-        Log.err('== clientSocket disconnected from server\n');
-        var inx = proxySockets.indexOf(proxySocket);
-        proxySockets.slice(inx, 1);
+        Log.err('客户端 ' + clientName + ' 正常关闭');
         context.serviceSocket.destroy();
+		context.proxySocket.destroy();
     });
 
-    context.proxySocket.on('error', function (error) {
-        Log.err('== clientSocket has error : \n', error);
-        // var inx = proxySockets.indexOf(proxySocket.remoteAddress + ":" + proxySocket.remotePort);
-        // proxySockets.slice(inx, 1);
-        delete proxySockets[key];
-        console.log(proxySockets.length)
-        context.serviceSocket.destroy();
-    });
-
-    context.proxySocket.on("close", function (hadError) {
-        // var inx = proxySockets.indexOf(proxySocket.remoteAddress + ":" + proxySocket.remotePort);
-        // proxySockets.slice(inx, 1);
-        delete proxySockets[key];
-        context.serviceSocket.destroy();
-    });
 });
 
 tcpProxyServer.on('error', function (error) {
-    Log.err('== tcpProxyServer has error : ', error);
+    Log.err('本地服务异常', error);
 });
 
-//创建反向代理服务
+//监听开启的端口
 tcpProxyServer.listen(Config.LOCAL_PORT);
-Log.warn("成功创建 监听端口: " + Config.LOCAL_PORT);
+Log.warn("Create proxy server , listening: " + Config.LOCAL_PORT);
 
 //300 毫秒检测连接
 var periodServerTest = setInterval(function () {
-}, 300);
+}, reConnSec);

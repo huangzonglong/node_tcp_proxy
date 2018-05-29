@@ -1,9 +1,4 @@
 exports.log = function() {
-
-    if (process.env.NODE_ENV != 'development'){
-        return;  
-    }
-
     var time = '\n' + new Date().toLocaleString() + ' : ';
 
     if (arguments.length <= 0) {

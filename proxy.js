@@ -48,6 +48,9 @@ function mqttBufferToString(buf) {
     return (new Buffer(JSON.parse(JSON.stringify(buf)))).toString();
 }
 
+var pingJson = {"type": "Buffer", "data": [208, 0]};
+var pingBuf = new Buffer(pingJson);
+
 Log.warn("服务启动>>>");
 
 /**
@@ -92,7 +95,11 @@ var tcpProxyServer = net.createServer( function (proxySocket) {
 
 			//服务器收到数据时，也往客户端发送数据
             context.serviceSocket.on("data", function (data) {
-                context.proxySocket.write(data);
+				console.log(data)
+				if(data !== pingBuf){
+					//此处要判断服务端是不是可写，不然报错
+					context.proxySocket.write(data);
+				}
             });
 
 			//emq服务端关闭时，也关闭当前客户端
@@ -108,6 +115,12 @@ var tcpProxyServer = net.createServer( function (proxySocket) {
 				
 				Log.err('serviceSocket has error', error);
             });
+			
+			//每十秒ping
+			var ping = setInterval(function () {
+				context.serviceSocket.write(pingBuf);
+			}, 10000);
+
         }
     });
 
